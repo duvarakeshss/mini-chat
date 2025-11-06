@@ -28,6 +28,8 @@ public class ChatApp extends JFrame {
     private Map<String, List<Message>> messageHistory = new HashMap<>();
     private BackendClient backendClient;
     private Map<String, String> contactMobileMap = new HashMap<>(); // Maps contact name to mobile number
+    private javax.swing.Timer messageRefreshTimer;
+    private Set<String> loadedMessageIds = new HashSet<>();
 
     public ChatApp() {
         // Show login dialog first
@@ -38,6 +40,12 @@ public class ChatApp extends JFrame {
         setSize(900, 650);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
+        
+        // Load existing messages immediately after login
+        loadMessagesFromBackend();
+        
+        // Start message refresh timer (check for new messages every 3 seconds)
+        startMessageRefreshTimer();
 
         // Header bar
         JPanel headerBar = new JPanel(new BorderLayout());
@@ -48,35 +56,28 @@ public class ChatApp extends JFrame {
         appTitle.setForeground(Color.WHITE);
         headerBar.add(appTitle, BorderLayout.WEST);
         
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+        buttonPanel.setBackground(WHATSAPP_GREEN);
+        
+        JButton settingsBtn = new JButton("⚙ Settings");
+        settingsBtn.setForeground(Color.WHITE);
+        settingsBtn.setBackground(WHATSAPP_GREEN);
+        settingsBtn.setBorderPainted(false);
+        settingsBtn.setFocusPainted(false);
+        settingsBtn.addActionListener(e -> showSettingsDialog());
+        
         JButton addContactBtn = new JButton("+ Add Contact");
         addContactBtn.setForeground(Color.WHITE);
         addContactBtn.setBackground(WHATSAPP_GREEN);
         addContactBtn.setBorderPainted(false);
         addContactBtn.setFocusPainted(false);
-        addContactBtn.addActionListener(e -> {
-            String name = JOptionPane.showInputDialog("Enter contact name:");
-            if (name != null && !name.trim().isEmpty()) {
-                boolean exists = false;
-                for (int i = 0; i < contacts.size(); i++) {
-                    if (contacts.get(i).name.equals(name)) {
-                        exists = true;
-                        break;
-                    }
-                }
-                if (!exists) {
-                    contacts.addElement(new Contact(name, "Online", true));
-                    chatPanels.put(name, new ChatPanel(name, this));
-                    
-                    // Prompt for mobile number
-                    String mobile = JOptionPane.showInputDialog("Enter " + name + "'s mobile number:");
-                    if (mobile != null && !mobile.trim().isEmpty()) {
-                        contactMobileMap.put(name, mobile.trim());
-                    }
-                }
-            }
-        });
-        headerBar.add(addContactBtn, BorderLayout.EAST);
+        addContactBtn.addActionListener(e -> showAddContactDialog());
+        
+        buttonPanel.add(settingsBtn);
+        buttonPanel.add(addContactBtn);
+        headerBar.add(buttonPanel, BorderLayout.EAST);
         add(headerBar, BorderLayout.NORTH);
+
 
         // Contact list with search
         contactListPanel = new JPanel(new BorderLayout());
@@ -107,15 +108,9 @@ public class ChatApp extends JFrame {
         });
         contactListPanel.add(searchField, BorderLayout.NORTH);
 
-        // Contact list
-        contacts.addElement(new Contact("Alice", "Hey there!", true));
-        contacts.addElement(new Contact("Bob", "Typing...", true));
-        contacts.addElement(new Contact("Group Chat", "5 messages", false));
-        contacts.addElement(new Contact("John Doe", "Offline", false));
-        
+        // Contact list (start empty)
         contactList = new JList<>(contacts);
         contactList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        contactList.setSelectedIndex(0);
         contactList.setCellRenderer(new ContactRenderer());
         contactList.setBackground(SIDEBAR_BG);
         contactList.addListSelectionListener(e -> {
@@ -131,21 +126,18 @@ public class ChatApp extends JFrame {
         contactScroll.setBorder(null);
         contactListPanel.add(contactScroll, BorderLayout.CENTER);
 
-        // Initial chat panel
-        currentChatPanel = new ChatPanel("Alice", this);
-        chatPanels.put("Alice", currentChatPanel);
-        contactMobileMap.put("Alice", "1234567890"); // Default contact
+        // Initial empty chat panel
+        JPanel welcomePanel = new JPanel(new GridBagLayout());
+        welcomePanel.setBackground(BG_COLOR);
+        JLabel welcomeLabel = new JLabel("Select a contact or add a new one to start chatting");
+        welcomeLabel.setFont(new Font("SansSerif", Font.PLAIN, 16));
+        welcomeLabel.setForeground(Color.GRAY);
+        welcomePanel.add(welcomeLabel);
 
-        splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, contactListPanel, currentChatPanel);
+        splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, contactListPanel, welcomePanel);
         splitPane.setDividerLocation(280);
         splitPane.setDividerSize(1);
         add(splitPane, BorderLayout.CENTER);
-
-        // Sample messages
-        currentChatPanel.addMessage("received", "09:00", "Hey, how are you?", false, false, null);
-        currentChatPanel.addMessage("sent", "09:05", "I'm good, thanks! How about you?", true, false, null);
-        currentChatPanel.addMessage("received", "09:06", "Doing great! Want to grab lunch?", false, false, null);
-        currentChatPanel.addMessage("sent", "09:10", "Sure! How about 12:30?", true, false, null);
     }
 
     private void showChat(String contact) {
@@ -155,7 +147,7 @@ public class ChatApp extends JFrame {
         List<Message> history = messageHistory.get(contact);
         if (history != null && panel.getMessageCount() == 0) {
             for (Message msg : history) {
-                panel.addMessage(msg.type, msg.time, msg.text, msg.delivered, msg.isFile, msg.fileName);
+                panel.addMessage(msg.type, msg.time, msg.text, msg.delivered, msg.isFile, msg.fileName, msg.fileData);
             }
         }
         
@@ -192,14 +184,16 @@ public class ChatApp extends JFrame {
         boolean delivered;
         boolean isFile;
         String fileName;
+        String fileData;
 
-        Message(String type, String time, String text, boolean delivered, boolean isFile, String fileName) {
+        Message(String type, String time, String text, boolean delivered, boolean isFile, String fileName, String fileData) {
             this.type = type;
             this.time = time;
             this.text = text;
             this.delivered = delivered;
             this.isFile = isFile;
             this.fileName = fileName;
+            this.fileData = fileData;
         }
     }
 
@@ -207,11 +201,13 @@ public class ChatApp extends JFrame {
         String name;
         String status;
         boolean online;
+        String mobile;
 
-        Contact(String name, String status, boolean online) {
+        Contact(String name, String status, boolean online, String mobile) {
             this.name = name;
             this.status = status;
             this.online = online;
+            this.mobile = mobile;
         }
     }
 
@@ -254,7 +250,17 @@ public class ChatApp extends JFrame {
         }
 
         public Component getListCellRendererComponent(JList<? extends Contact> list, Contact contact, int index, boolean isSelected, boolean cellHasFocus) {
-            nameLabel.setText(contact.name);
+            // Create HTML to show name in normal font and mobile in smaller font
+            String displayText;
+            if (contact.mobile != null && !contact.name.equals(contact.mobile)) {
+                // Show both name and mobile if they're different
+                displayText = "<html><b>" + contact.name + "</b><br/>" +
+                            "<font size='2' color='gray'>" + contact.mobile + "</font></html>";
+            } else {
+                // Show only name if mobile is same as name (auto-added contacts)
+                displayText = "<html><b>" + contact.name + "</b></html>";
+            }
+            nameLabel.setText(displayText);
             statusLabel.setText(contact.status);
             statusDot.setBackground(contact.online ? WHATSAPP_GREEN : Color.GRAY);
 
@@ -275,6 +281,7 @@ public class ChatApp extends JFrame {
         private String contactName;
         private ChatApp parent;
         private int messageCount = 0;
+        private JLabel contactLabel;
 
         public ChatPanel(String contactName, ChatApp parent) {
             this.contactName = contactName;
@@ -287,9 +294,21 @@ public class ChatApp extends JFrame {
             chatHeader.setPreferredSize(new Dimension(0, 50));
             chatHeader.setBorder(new EmptyBorder(10, 15, 10, 15));
             
-            JLabel contactLabel = new JLabel(contactName);
+            contactLabel = new JLabel(contactName);
             contactLabel.setFont(new Font("SansSerif", Font.BOLD, 16));
             chatHeader.add(contactLabel, BorderLayout.WEST);
+            
+            // Fetch and update username from backend
+            new Thread(() -> {
+                String mobile = parent.contactMobileMap.get(contactName);
+                if (mobile != null) {
+                    Map<String, String> userInfo = parent.backendClient.getUserInfo(mobile);
+                    String username = userInfo.get("username");
+                    if (username != null && !username.isEmpty() && !username.equals(mobile)) {
+                        SwingUtilities.invokeLater(() -> contactLabel.setText(username));
+                    }
+                }
+            }).start();
             
             JLabel statusLabel = new JLabel("online");
             statusLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
@@ -335,12 +354,10 @@ public class ChatApp extends JFrame {
                 public void actionPerformed(ActionEvent e) {
                     String text = inputField.getText().trim();
                     if (!text.isEmpty()) {
-                        String timestamp = new SimpleDateFormat("HH:mm").format(new Date());
-                        addMessage("sent", timestamp, text, true, false, null);
+                        // Clear input field immediately for better UX
                         inputField.setText("");
-                        scrollToBottom();
                         
-                        // Send message to backend
+                        // Send message to backend - don't add to UI yet to prevent duplicates
                         String receiverMobile = parent.contactMobileMap.get(contactName);
                         if (receiverMobile != null && !receiverMobile.isEmpty()) {
                             new Thread(() -> {
@@ -351,19 +368,17 @@ public class ChatApp extends JFrame {
                                             "Failed to send message to backend!", 
                                             "Error", JOptionPane.ERROR_MESSAGE);
                                     });
+                                } else {
+                                    System.out.println("Message sent successfully to " + receiverMobile);
+                                    // Trigger immediate refresh to show the message from backend
+                                    parent.loadMessagesFromBackend();
                                 }
                             }).start();
+                        } else {
+                            JOptionPane.showMessageDialog(ChatPanel.this, 
+                                "No mobile number found for " + contactName + ".\nPlease add their mobile number.", 
+                                "Warning", JOptionPane.WARNING_MESSAGE);
                         }
-                        
-                        // Simulate auto-reply after 2 seconds (for demo)
-                        javax.swing.Timer timer = new javax.swing.Timer(2000, evt -> {
-                            String reply = getAutoReply(text);
-                            String replyTime = new SimpleDateFormat("HH:mm").format(new Date());
-                            addMessage("received", replyTime, reply, false, false, null);
-                            scrollToBottom();
-                        });
-                        timer.setRepeats(false);
-                        timer.start();
                     }
                 }
             };
@@ -399,8 +414,8 @@ public class ChatApp extends JFrame {
             add(inputPanel, BorderLayout.SOUTH);
         }
 
-        public void addMessage(String type, String time, String text, boolean delivered, boolean isFile, String fileName) {
-            MessageBubble bubble = new MessageBubble(type, time, text, delivered, isFile, fileName);
+        public void addMessage(String type, String time, String text, boolean delivered, boolean isFile, String fileName, String fileData) {
+            MessageBubble bubble = new MessageBubble(type, time, text, delivered, isFile, fileName, fileData);
             
             JPanel wrapper = new JPanel();
             wrapper.setLayout(new BoxLayout(wrapper, BoxLayout.X_AXIS));
@@ -419,6 +434,9 @@ public class ChatApp extends JFrame {
             messagePanel.revalidate();
             messagePanel.repaint();
             messageCount++;
+            
+            // Auto-scroll to bottom when new message is added
+            scrollToBottom();
         }
 
         public int getMessageCount() {
@@ -457,21 +475,51 @@ public class ChatApp extends JFrame {
                 File selectedFile = fileChooser.getSelectedFile();
                 String fileName = selectedFile.getName();
                 long fileSize = selectedFile.length();
-                String fileSizeStr = formatFileSize(fileSize);
                 
-                String timestamp = new SimpleDateFormat("HH:mm").format(new Date());
-                String fileInfo = fileName + " (" + fileSizeStr + ")";
-                addMessage("sent", timestamp, fileInfo, true, true, fileName);
-                scrollToBottom();
+                // Check file size limit (5MB)
+                if (fileSize > 5 * 1024 * 1024) {
+                    JOptionPane.showMessageDialog(this, 
+                        "File too large! Maximum size is 5MB.", 
+                        "Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
                 
-                // Simulate file received confirmation
-                javax.swing.Timer timer = new javax.swing.Timer(1500, evt -> {
-                    String replyTime = new SimpleDateFormat("HH:mm").format(new Date());
-                    addMessage("received", replyTime, "File received!", false, false, null);
-                    scrollToBottom();
-                });
-                timer.setRepeats(false);
-                timer.start();
+                // Send file to backend
+                String receiverMobile = parent.contactMobileMap.get(contactName);
+                if (receiverMobile != null && !receiverMobile.isEmpty()) {
+                    new Thread(() -> {
+                        try {
+                            // Read file and convert to Base64
+                            byte[] fileBytes = java.nio.file.Files.readAllBytes(selectedFile.toPath());
+                            String base64Data = java.util.Base64.getEncoder().encodeToString(fileBytes);
+                            
+                            boolean success = parent.backendClient.sendFile(receiverMobile, fileName, base64Data);
+                            
+                            if (!success) {
+                                SwingUtilities.invokeLater(() -> {
+                                    JOptionPane.showMessageDialog(ChatPanel.this, 
+                                        "Failed to send file!", 
+                                        "Error", JOptionPane.ERROR_MESSAGE);
+                                });
+                            } else {
+                                System.out.println("File sent successfully: " + fileName);
+                                // Trigger immediate refresh to show the file message
+                                parent.loadMessagesFromBackend();
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Error reading file: " + e.getMessage());
+                            SwingUtilities.invokeLater(() -> {
+                                JOptionPane.showMessageDialog(ChatPanel.this, 
+                                    "Error reading file: " + e.getMessage(), 
+                                    "Error", JOptionPane.ERROR_MESSAGE);
+                            });
+                        }
+                    }).start();
+                } else {
+                    JOptionPane.showMessageDialog(this, 
+                        "No mobile number found for " + contactName + ".\nPlease add their mobile number.", 
+                        "Warning", JOptionPane.WARNING_MESSAGE);
+                }
             }
         }
 
@@ -505,19 +553,64 @@ public class ChatApp extends JFrame {
         private boolean delivered;
         private boolean isFile;
         private String fileName;
+        private String fileData; // Base64 encoded file data
 
-        public MessageBubble(String type, String time, String text, boolean delivered, boolean isFile, String fileName) {
+        public MessageBubble(String type, String time, String text, boolean delivered, boolean isFile, String fileName, String fileData) {
             this.type = type;
             this.time = time;
             this.text = text;
             this.delivered = delivered;
             this.isFile = isFile;
             this.fileName = fileName;
+            this.fileData = fileData;
             setOpaque(false);
             setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
             
             if (isFile) {
-                setToolTipText("File: " + fileName);
+                setToolTipText("Click to download: " + fileName);
+                setCursor(new Cursor(Cursor.HAND_CURSOR));
+                
+                // Add click listener for file download
+                addMouseListener(new java.awt.event.MouseAdapter() {
+                    @Override
+                    public void mouseClicked(java.awt.event.MouseEvent e) {
+                        downloadFile();
+                    }
+                });
+            }
+        }
+        
+        private void downloadFile() {
+            if (fileData == null || fileData.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "File data not available", "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            
+            JFileChooser fileChooser = new JFileChooser();
+            fileChooser.setSelectedFile(new java.io.File(fileName));
+            
+            int result = fileChooser.showSaveDialog(this);
+            if (result == JFileChooser.APPROVE_OPTION) {
+                java.io.File selectedFile = fileChooser.getSelectedFile();
+                
+                try {
+                    // Decode Base64 data
+                    byte[] decodedBytes = java.util.Base64.getDecoder().decode(fileData);
+                    
+                    // Write to file
+                    java.nio.file.Files.write(selectedFile.toPath(), decodedBytes);
+                    
+                    JOptionPane.showMessageDialog(this, 
+                        "File downloaded successfully!\n" + selectedFile.getAbsolutePath(), 
+                        "Success", 
+                        JOptionPane.INFORMATION_MESSAGE);
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(this, 
+                        "Failed to download file: " + ex.getMessage(), 
+                        "Error", 
+                        JOptionPane.ERROR_MESSAGE);
+                    ex.printStackTrace();
+                }
             }
         }
 
@@ -711,29 +804,95 @@ public class ChatApp extends JFrame {
     }
 
     private void loadMessagesFromBackend() {
-        List<Map<String, String>> messages = backendClient.getMessages();
-        
-        for (Map<String, String> msg : messages) {
-            String senderMobile = msg.get("sender_mobile");
-            String receiverMobile = msg.get("receiver_mobile");
-            String content = msg.get("content");
+        new Thread(() -> {
+            List<Map<String, String>> messages = backendClient.getMessages();
+            System.out.println("Loaded " + messages.size() + " messages from backend");
+            System.out.println("Currently have " + loadedMessageIds.size() + " message IDs in cache");
             
-            boolean isSent = senderMobile.equals(backendClient.getCurrentUserMobile());
-            String contactMobile = isSent ? receiverMobile : senderMobile;
-            
-            // Check if contact exists, if not add it
-            String contactName = findContactByMobile(contactMobile);
-            if (contactName == null) {
-                contactName = contactMobile;
-                contacts.addElement(new Contact(contactName, "Chat available", true));
-                contactMobileMap.put(contactName, contactMobile);
-            }
-            
-            // Add message to chat panel
-            ChatPanel panel = chatPanels.computeIfAbsent(contactName, k -> new ChatPanel(k, this));
-            String timestamp = new SimpleDateFormat("HH:mm").format(new Date());
-            panel.addMessage(isSent ? "sent" : "received", timestamp, content, true, false, null);
-        }
+            SwingUtilities.invokeLater(() -> {
+                int newMessagesCount = 0;
+                int skippedCount = 0;
+                for (int i = 0; i < messages.size(); i++) {
+                    Map<String, String> msg = messages.get(i);
+                    String messageId = msg.get("id");
+                    String senderMobile = msg.get("sender_mobile");
+                    String receiverMobile = msg.get("receiver_mobile");
+                    String content = msg.get("content");
+                    String timestamp = msg.get("timestamp");
+                    
+                    System.out.println("Message " + (i+1) + ": ID=" + messageId + ", from=" + senderMobile + " to=" + receiverMobile);
+                    
+                    // Skip if already loaded
+                    if (loadedMessageIds.contains(messageId)) {
+                        skippedCount++;
+                        System.out.println("  -> SKIPPED (duplicate)");
+                        continue;
+                    }
+                    
+                    boolean isSent = senderMobile.equals(backendClient.getCurrentUserMobile());
+                    String contactMobile = isSent ? receiverMobile : senderMobile;
+                    
+                    // Check if contact exists, if not add it
+                    String contactName = findContactByMobile(contactMobile);
+                    if (contactName == null) {
+                        // Fetch username from backend
+                        Map<String, String> userInfo = backendClient.getUserInfo(contactMobile);
+                        String username = userInfo.get("username");
+                        contactName = (username != null && !username.isEmpty() && !username.equals(contactMobile)) 
+                                      ? username : contactMobile;
+                        
+                        contacts.addElement(new Contact(contactName, "Chat available", true, contactMobile));
+                        contactMobileMap.put(contactName, contactMobile);
+                        System.out.println("  -> Auto-added contact: " + contactName + " (" + contactMobile + ")");
+                    }
+                    
+                    // Get or create chat panel
+                    ChatPanel panel = chatPanels.computeIfAbsent(contactName, k -> new ChatPanel(k, this));
+                    
+                    loadedMessageIds.add(messageId);
+                    newMessagesCount++;
+                    
+                    // Format timestamp to show only time (HH:mm)
+                    String displayTime = "";
+                    if (timestamp != null && !timestamp.isEmpty()) {
+                        try {
+                            // Parse timestamp format: "2025-11-06 14:30:45"
+                            String[] parts = timestamp.split(" ");
+                            if (parts.length > 1) {
+                                String timePart = parts[1]; // "14:30:45"
+                                String[] timeParts = timePart.split(":");
+                                if (timeParts.length >= 2) {
+                                    displayTime = timeParts[0] + ":" + timeParts[1]; // "14:30"
+                                }
+                            }
+                        } catch (Exception e) {
+                            displayTime = new SimpleDateFormat("HH:mm").format(new Date());
+                        }
+                    } else {
+                        displayTime = new SimpleDateFormat("HH:mm").format(new Date());
+                    }
+                    
+                    // Check if this is a file message
+                    String isFileStr = msg.get("is_file");
+                    boolean isFile = "true".equalsIgnoreCase(isFileStr) || "True".equalsIgnoreCase(isFileStr);
+                    String fileName = msg.get("file_name");
+                    String fileData = msg.get("file_data");
+                    
+                    // Add message to chat panel
+                    panel.addMessage(isSent ? "sent" : "received", displayTime, content, true, isFile, fileName, fileData);
+                    System.out.println("  -> ADDED to chat" + (isFile ? " (FILE: " + fileName + ")" : ""));
+                }
+                System.out.println("Summary: Added " + newMessagesCount + " new messages, skipped " + skippedCount + " duplicates");
+                System.out.println("Total message IDs in cache now: " + loadedMessageIds.size());
+            });
+        }).start();
+    }
+    
+    private void startMessageRefreshTimer() {
+        messageRefreshTimer = new javax.swing.Timer(3000, e -> {
+            loadMessagesFromBackend();
+        });
+        messageRefreshTimer.start();
     }
 
     private String findContactByMobile(String mobile) {
@@ -743,6 +902,182 @@ public class ChatApp extends JFrame {
             }
         }
         return null;
+    }
+
+    private void showAddContactDialog() {
+        JDialog addContactDialog = new JDialog(this, "Add Contact", true);
+        addContactDialog.setSize(400, 200);
+        addContactDialog.setLocationRelativeTo(this);
+        addContactDialog.setLayout(new BorderLayout(10, 10));
+        
+        JPanel inputPanel = new JPanel(new GridBagLayout());
+        inputPanel.setBorder(new EmptyBorder(20, 20, 20, 20));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.insets = new Insets(5, 5, 5, 5);
+        
+        JLabel nameLabel = new JLabel("Contact Name:");
+        JTextField nameField = new JTextField(20);
+        JLabel mobileLabel = new JLabel("Mobile Number:");
+        JTextField mobileField = new JTextField(20);
+        
+        gbc.gridx = 0; gbc.gridy = 0;
+        inputPanel.add(nameLabel, gbc);
+        gbc.gridx = 1;
+        inputPanel.add(nameField, gbc);
+        
+        gbc.gridx = 0; gbc.gridy = 1;
+        inputPanel.add(mobileLabel, gbc);
+        gbc.gridx = 1;
+        inputPanel.add(mobileField, gbc);
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 10));
+        JButton addBtn = new JButton("Add");
+        JButton cancelBtn = new JButton("Cancel");
+        
+        addBtn.setBackground(WHATSAPP_GREEN);
+        addBtn.setForeground(Color.WHITE);
+        addBtn.setFocusPainted(false);
+        
+        addBtn.addActionListener(e -> {
+            String name = nameField.getText().trim();
+            String mobile = mobileField.getText().trim();
+            
+            if (name.isEmpty() || mobile.isEmpty()) {
+                JOptionPane.showMessageDialog(addContactDialog, 
+                    "Please fill in all fields!", 
+                    "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            
+            boolean exists = false;
+            for (int i = 0; i < contacts.size(); i++) {
+                if (contacts.get(i).name.equals(name)) {
+                    exists = true;
+                    break;
+                }
+            }
+            
+            if (exists) {
+                JOptionPane.showMessageDialog(addContactDialog, 
+                    "Contact already exists!", 
+                    "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            
+            contacts.addElement(new Contact(name, "Available", true, mobile));
+            chatPanels.put(name, new ChatPanel(name, this));
+            contactMobileMap.put(name, mobile);
+            
+            JOptionPane.showMessageDialog(addContactDialog, 
+                "Contact added successfully!", 
+                "Success", JOptionPane.INFORMATION_MESSAGE);
+            addContactDialog.dispose();
+        });
+        
+        cancelBtn.addActionListener(e -> addContactDialog.dispose());
+        
+        buttonPanel.add(addBtn);
+        buttonPanel.add(cancelBtn);
+        
+        addContactDialog.add(inputPanel, BorderLayout.CENTER);
+        addContactDialog.add(buttonPanel, BorderLayout.SOUTH);
+        addContactDialog.setVisible(true);
+    }
+
+    private void showSettingsDialog() {
+        JDialog settingsDialog = new JDialog(this, "Settings", true);
+        settingsDialog.setSize(450, 300);
+        settingsDialog.setLocationRelativeTo(this);
+        settingsDialog.setLayout(new BorderLayout(10, 10));
+        
+        JPanel mainPanel = new JPanel(new GridBagLayout());
+        mainPanel.setBorder(new EmptyBorder(20, 20, 20, 20));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.insets = new Insets(5, 5, 5, 5);
+        
+        JLabel mobileLabel = new JLabel("Mobile:");
+        JLabel mobileValue = new JLabel(backendClient.getCurrentUserMobile());
+        mobileValue.setFont(new Font("SansSerif", Font.BOLD, 14));
+        
+        JLabel usernameLabel = new JLabel("Username:");
+        JTextField usernameField = new JTextField(
+            backendClient.getCurrentUsername().isEmpty() ? 
+            backendClient.getCurrentUserMobile() : 
+            backendClient.getCurrentUsername(), 20);
+        
+        JLabel aboutLabel = new JLabel("About:");
+        JTextArea aboutField = new JTextArea(3, 20);
+        aboutField.setLineWrap(true);
+        aboutField.setWrapStyleWord(true);
+        aboutField.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
+        aboutField.setText(backendClient.getCurrentUserAbout());
+        
+        gbc.gridx = 0; gbc.gridy = 0;
+        mainPanel.add(mobileLabel, gbc);
+        gbc.gridx = 1;
+        mainPanel.add(mobileValue, gbc);
+        
+        gbc.gridx = 0; gbc.gridy = 1;
+        mainPanel.add(usernameLabel, gbc);
+        gbc.gridx = 1;
+        mainPanel.add(usernameField, gbc);
+        
+        gbc.gridx = 0; gbc.gridy = 2;
+        mainPanel.add(aboutLabel, gbc);
+        gbc.gridx = 1;
+        JScrollPane aboutScroll = new JScrollPane(aboutField);
+        mainPanel.add(aboutScroll, gbc);
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 10));
+        JButton saveBtn = new JButton("Save Changes");
+        JButton closeBtn = new JButton("Close");
+        
+        saveBtn.setBackground(TELEGRAM_BLUE);
+        saveBtn.setForeground(Color.WHITE);
+        saveBtn.setFocusPainted(false);
+        
+        saveBtn.addActionListener(e -> {
+            String newUsername = usernameField.getText().trim();
+            String about = aboutField.getText().trim();
+            
+            if (about.isEmpty()) {
+                about = "Hey there! I am using Chat App";
+            }
+            
+            if (!newUsername.isEmpty()) {
+                final String finalAbout = about;
+                new Thread(() -> {
+                    boolean success = backendClient.register(
+                        backendClient.getCurrentUserMobile(), 
+                        newUsername,
+                        finalAbout);
+                    
+                    SwingUtilities.invokeLater(() -> {
+                        if (success) {
+                            setTitle("Chat App - " + newUsername);
+                            JOptionPane.showMessageDialog(settingsDialog, 
+                                "Settings saved successfully!", 
+                                "Success", JOptionPane.INFORMATION_MESSAGE);
+                        } else {
+                            JOptionPane.showMessageDialog(settingsDialog, 
+                                "Note: Username and about saved locally.", 
+                                "Info", JOptionPane.INFORMATION_MESSAGE);
+                        }
+                    });
+                }).start();
+            }
+        });
+        
+        closeBtn.addActionListener(e -> settingsDialog.dispose());
+        
+        buttonPanel.add(saveBtn);
+        buttonPanel.add(closeBtn);
+        
+        settingsDialog.add(mainPanel, BorderLayout.CENTER);
+        settingsDialog.add(buttonPanel, BorderLayout.SOUTH);
+        settingsDialog.setVisible(true);
     }
 
     public static void main(String[] args) {
