@@ -4,7 +4,7 @@
 		{
 			"label": "run",
 			"type": "shell",
-			"command": "java -cp target/classes com.example.chatapp.ChatApp",
+			"command": "java -cp App/target/classes com.example.chatapp.ChatApp",
 			"isBackground": true,
 			"group": "build"
 		}
